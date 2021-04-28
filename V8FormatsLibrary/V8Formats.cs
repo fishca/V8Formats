@@ -40,12 +40,26 @@ namespace DevelPlatform.OneCEUtils.V8Formats
             /// <summary>
             /// Стандартный размер блока данных в байтах для форматов файлов CF, EPF и ERF.
             /// </summary>
-            public static UInt32 V8_DEFAULT_PAGE_SIZE = 512;
+            public static UInt32 V8_DEFAULT_PAGE_SIZE = 512; // 0x200
+            /// <summary>
+            /// Стандартный размер блока данных в байтах для форматов старше 8.3.15 файлов CF, EPF и ERF.
+            /// </summary>
+            public static UInt32 V8_DEFAULT_PAGE_SIZE_8316 = 65536; // 0x10000
             /// <summary>
             /// Константа, обозначающая некую «пустоту» – это число 0x7fffffff.
             /// Когда мы собираем документ из блоков, то смотрим в заголовке на адрес следующего блока. Если он равен 0x7fffffff, то «следующего» блока нет, этот – последний.
             /// </summary>
             private static UInt32 V8_FF_SIGNATURE = 0x7fffffff;
+            /// <summary>
+            /// Константа, обозначающая некую «пустоту» – это число 0x7fffffff.
+            /// Когда мы собираем документ из блоков, то смотрим в заголовке на адрес следующего блока. Если он равен 0x7fffffff, то «следующего» блока нет, этот – последний.
+            /// </summary>
+            private static UInt64 V8_FF64_SIGNATURE = 0xffffffffffffffff;
+            /// <summary>
+            /// Константа, которая указывает начало чтения данных нового формата
+            /// волшебное смещение, откуда такая цифра неизвестно...
+            /// </summary>
+            private static UInt32 Offset_816 = 0x1359;  
 
             #endregion
 
@@ -144,6 +158,53 @@ namespace DevelPlatform.OneCEUtils.V8Formats
                 }
             };
 
+
+            private struct stFileHeader64
+            {
+                byte[] next_page_addr;    // 64 бита стало
+                byte[] page_size;
+                byte[] storage_ver;
+                byte[] reserved;          // всегда 0x00000000 ?
+
+                public static uint Size()
+                {
+                    return 8 + 4 + 4 + 4; // 20 байт стало
+                }
+
+                public byte[] ToBytes()
+                {
+                    byte[] resultBytes = new byte[16];
+
+                    this.next_page_addr.CopyTo(resultBytes, 0);
+                    this.page_size.CopyTo(resultBytes, 8);
+                    this.storage_ver.CopyTo(resultBytes, 12);
+                    this.reserved.CopyTo(resultBytes, 16);
+
+                    return resultBytes;
+                }
+
+                public stFileHeader64(byte[] pFileData, UInt32 indexBegin)
+                {
+                    this.next_page_addr = new byte[8];  // 64 бита стало
+                    for (int i = 0; i < 8; i++)
+                        this.next_page_addr[i] = pFileData[i + indexBegin];
+
+                    this.page_size = new byte[4];
+                    for (int i = 0; i < 4; i++)
+                        this.page_size[i] = pFileData[i + indexBegin + 8];
+
+                    this.storage_ver = new byte[4];
+                    for (int i = 0; i < 4; i++)
+                        this.storage_ver[i] = pFileData[i + indexBegin + 12];
+
+                    this.reserved = new byte[4];
+                    for (int i = 0; i < 4; i++)
+                        this.storage_ver[i] = pFileData[i + indexBegin + 16];
+                }
+            };
+
+
+
             private struct stElemAddr
             {
                 public UInt32 elem_header_addr;
@@ -189,6 +250,56 @@ namespace DevelPlatform.OneCEUtils.V8Formats
                     this.fffffff = BitConverter.ToUInt32(buffer, 8);
                 }
             };
+
+
+            private struct stElemAddr64
+            {
+                public UInt64 elem_header_addr;
+                public UInt64 elem_data_addr;
+                public UInt64 fffffff; //всегда 0xffffffffffffffff ?
+
+                public static uint Size()
+                {
+                    return 8 + 8 + 8;
+                }
+
+                public byte[] ToBytes()
+                {
+                    byte[] byteResult = new byte[stElemAddr64.Size()];
+
+                    byte[] buf = BitConverter.GetBytes(elem_header_addr);
+                    Array.Copy(buf, 0, byteResult, 0, 8);
+
+                    buf = BitConverter.GetBytes(elem_data_addr);
+                    Array.Copy(buf, 0, byteResult, 8, 8);
+
+                    buf = BitConverter.GetBytes(fffffff);
+                    Array.Copy(buf, 0, byteResult, 16, 8);
+
+                    return byteResult;
+                }
+
+                public stElemAddr64(byte[] source, int beginIndex)
+                {
+                    this.elem_header_addr = BitConverter.ToUInt64(source, beginIndex);
+                    this.elem_data_addr   = BitConverter.ToUInt64(source, beginIndex + 8);
+                    this.fffffff          = BitConverter.ToUInt64(source, beginIndex + 16); ;
+                }
+
+                public stElemAddr64(MemoryTributary source, int beginIndex)
+                {
+                    byte[] buffer;
+                    BinaryReader binReader = new BinaryReader(source);
+                    binReader.BaseStream.Position = beginIndex;
+                    buffer = binReader.ReadBytes(24);
+
+                    this.elem_header_addr = BitConverter.ToUInt64(buffer, 0);
+                    this.elem_data_addr   = BitConverter.ToUInt64(buffer, 8);
+                    this.fffffff          = BitConverter.ToUInt64(buffer, 16);
+                }
+            };
+
+
 
             private struct stBlockHeader
             {
@@ -252,6 +363,72 @@ namespace DevelPlatform.OneCEUtils.V8Formats
                     this.EOL2_0A = pFileData[30 + begIndex];
                 }
             };
+
+
+            private struct stBlockHeader64
+            {
+                public byte EOL_0D;
+                public byte EOL_0A;
+                public byte[] data_size_hex;
+                public byte space1;
+                public byte[] page_size_hex;
+                public byte space2;
+                public byte[] next_page_addr_hex;
+                public byte space3;
+                public byte EOL2_0D;
+                public byte EOL2_0A;
+
+                public static uint Size()
+                {
+                    return 1 + 1 + 16 + 1 + 16 + 1 + 16 + 1 + 1 + 1;
+                }
+
+                public byte[] ToBytes()
+                {
+                    byte[] resultBytes = new byte[stBlockHeader64.Size()];
+
+                    resultBytes[0] = this.EOL_0D;
+                    resultBytes[1] = this.EOL_0A;
+                    for (int i = 0; i < 16; i++)
+                        resultBytes[i + 2] = this.data_size_hex[i];
+                    resultBytes[18] = this.space1;
+                    for (int i = 0; i < 16; i++)
+                        resultBytes[i + 19] = this.page_size_hex[i];
+                    resultBytes[35] = this.space2;
+                    for (int i = 0; i < 16; i++)
+                        resultBytes[i + 36] = this.next_page_addr_hex[i];
+                    resultBytes[52] = this.space3;
+                    resultBytes[53] = this.EOL2_0D;
+                    resultBytes[54] = this.EOL2_0A;
+
+                    return resultBytes;
+                }
+
+                public stBlockHeader64(byte[] pFileData, UInt32 begIndex)
+                {
+                    this.EOL_0D = pFileData[0 + begIndex];
+                    this.EOL_0A = pFileData[1 + begIndex];
+                    // data_size_hex 
+                    this.data_size_hex = new byte[16];
+                    for (int i = 0; i < 16; i++)
+                        this.data_size_hex[i] = pFileData[i + 2 + begIndex];
+                    this.space1 = pFileData[18 + begIndex];
+                    // page_size_hex 
+                    this.page_size_hex = new byte[16];
+                    for (int i = 0; i < 16; i++)
+                        this.page_size_hex[i] = pFileData[i + 19 + begIndex];
+                    this.space2 = pFileData[35 + begIndex];
+                    // next_page_addr_hex 
+                    this.next_page_addr_hex = new byte[16];
+                    for (int i = 0; i < 16; i++)
+                        this.next_page_addr_hex[i] = pFileData[i + 36 + begIndex];
+                    this.space3  = pFileData[52 + begIndex];
+                    this.EOL2_0D = pFileData[53 + begIndex];
+                    this.EOL2_0A = pFileData[54 + begIndex];
+                }
+            };
+
+
 
             #endregion
 
@@ -323,7 +500,7 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
             #endregion
 
-            #region InflareAndDeflate
+            #region InflateAndDeflate
 
             private bool Inflate(MemoryTributary compressedMemoryStream, out MemoryTributary outBufStream)
             {
