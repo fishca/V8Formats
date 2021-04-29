@@ -51,8 +51,8 @@ namespace DevelPlatform.OneCEUtils.V8Formats
             /// </summary>
             private static UInt32 V8_FF_SIGNATURE = 0x7fffffff;
             /// <summary>
-            /// Константа, обозначающая некую «пустоту» – это число 0x7fffffff.
-            /// Когда мы собираем документ из блоков, то смотрим в заголовке на адрес следующего блока. Если он равен 0x7fffffff, то «следующего» блока нет, этот – последний.
+            /// Константа, обозначающая некую «пустоту» – это число 0xffffffffffffffff.
+            /// Когда мы собираем документ из блоков, то смотрим в заголовке на адрес следующего блока. Если он равен 0xffffffffffffffff, то «следующего» блока нет, этот – последний.
             /// </summary>
             private static UInt64 V8_FF64_SIGNATURE = 0xffffffffffffffff;
             /// <summary>
@@ -71,7 +71,11 @@ namespace DevelPlatform.OneCEUtils.V8Formats
             public Mode OperationMode { set; get; }
 
             private stFileHeader FileHeader;
+            private stFileHeader64 FileHeader64;
+
             private List<stElemAddr> ElemsAddrs;
+            private List<stElemAddr64> ElemsAddrs64;
+
             private List<CV8Elem> Elems;
             private bool IsDataPacked;
 
@@ -380,7 +384,7 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                 public static uint Size()
                 {
-                    return 1 + 1 + 16 + 1 + 16 + 1 + 16 + 1 + 1 + 1;
+                    return 1 + 1 + 16 + 1 + 16 + 1 + 16 + 1 + 1 + 1; // теперь 55
                 }
 
                 public byte[] ToBytes()
@@ -752,13 +756,21 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                 using (BinaryReader reader = new BinaryReader(File.Open(filename, FileMode.Open)))
                 {
-                    bool isV8File = IsV8File(reader);
-                    if (!isV8File)
+                    bool isV8File16 = IsV8File16(reader);
+                    if (!isV8File16)
                         throw new Exception("Input file is not 1C:Enterprise 8.x format!");
 
-                    LoadFile(reader);
+                    if (isV8File16)
+                    {
+                        LoadFile16(reader);
+                        SaveFileToFolder(dirname, reader);
 
-                    SaveFileToFolder(dirname, reader);
+                    }
+                    else
+                    {
+                        LoadFile(reader);
+                        SaveFileToFolder(dirname, reader);
+                    }
                 }
 
                 ClearTempData();
@@ -787,6 +799,7 @@ namespace DevelPlatform.OneCEUtils.V8Formats
                 BinaryReader binReader = new BinaryReader(inputFileStream);
                 return IsV8File(binReader);
             }
+            
             private static bool IsV8File(BinaryReader inputFileStream)
             {
                 if (inputFileStream.BaseStream.Length == 0)
@@ -819,6 +832,40 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                 return true;
             }
+
+            private static bool IsV8File16(BinaryReader inputFileStream)
+            {
+                if (inputFileStream.BaseStream.Length == 0)
+                {
+                    return false;
+                }
+
+                // проверим чтобы длина файла не была меньше длины заголовка файла и заголовка блока адресов
+                if (inputFileStream.BaseStream.Length < stFileHeader64.Size() + stBlockHeader64.Size())
+                    return false;
+
+                long prevPosition = inputFileStream.BaseStream.Position;
+                inputFileStream.BaseStream.Position = Offset_816;
+
+                stBlockHeader64 pBlockHeader = new stBlockHeader64(inputFileStream.ReadBytes((int)stBlockHeader64.Size() + 20), 20);
+
+                inputFileStream.BaseStream.Position = prevPosition;
+
+                if (pBlockHeader.EOL_0D != 0x0d ||
+                        pBlockHeader.EOL_0A != 0x0a ||
+                        pBlockHeader.space1 != 0x20 ||
+                        pBlockHeader.space2 != 0x20 ||
+                        pBlockHeader.space3 != 0x20 ||
+                        pBlockHeader.EOL2_0D != 0x0d ||
+                        pBlockHeader.EOL2_0A != 0x0a)
+                {
+
+                    return false;
+                }
+
+                return true;
+            }
+
 
             private void LoadFile(BinaryReader inputFileStream, bool boolInflate = true, bool UnpackWhenNeed = true)
             {
@@ -935,6 +982,131 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                 inputFileStream.BaseStream.Position = prevPosition;
             }
+
+            private void LoadFile16(BinaryReader inputFileStream, bool boolInflate = true, bool UnpackWhenNeed = true)
+            {
+                long prevPosition = inputFileStream.BaseStream.Position;
+                inputFileStream.BaseStream.Position = Offset_816;
+
+                bool useTempFiles = false;
+                if (OperationMode == Mode.FileSystem)
+                    useTempFiles = true;
+                else if (OperationMode == Mode.Optimal)
+                {
+                    // В оптимальном режиме, если обрабатываемый файл больше 200 МБ,
+                    // то автоматически включается режим использования файловой системы
+                    if (inputFileStream.BaseStream.Length > MAX_FILE_SIZE)
+                        OperationMode = Mode.FileSystem;
+                }
+
+                MemoryTributary InflateBufferStream;
+                UInt32 InflateSize = 0;
+
+                this.FileHeader64 = new stFileHeader64(inputFileStream.ReadBytes((int)stFileHeader64.Size()), 0);
+
+                stBlockHeader64 pBlockHeader = new stBlockHeader64(inputFileStream.ReadBytes((int)stBlockHeader64.Size()), 0);
+
+                UInt32 ElemsAddrsSize;
+                
+                MemoryTributary pElemsAddrsStream;
+
+                //ReadBlockData(inputFileStream, pBlockHeader, stFileHeader.Size(), out pElemsAddrsStream, out ElemsAddrsSize);
+                ReadBlockData64(inputFileStream, pBlockHeader, stFileHeader64.Size(), out pElemsAddrsStream, out ElemsAddrsSize);
+
+                UInt32 ElemsNum = ElemsAddrsSize / stElemAddr64.Size();
+
+                Elems.Clear();
+                ElemsAddrs64.Clear();
+
+                for (UInt32 i = 0; i < ElemsNum; i++)
+                {
+
+                    stElemAddr64 pElemsAddrs = new stElemAddr64(pElemsAddrsStream, (int)(i * stElemAddr64.Size()));
+                    ElemsAddrs64.Add(pElemsAddrs);
+
+                    if (pElemsAddrs.fffffff != V8_FF64_SIGNATURE)
+                    {
+                        ElemsNum = i;
+                        break;
+                    }
+
+                    inputFileStream.BaseStream.Position = (long)pElemsAddrs.elem_header_addr;
+                    pBlockHeader = new stBlockHeader64(inputFileStream.ReadBytes((int)stBlockHeader64.Size()), 0);
+
+                    if (pBlockHeader.EOL_0D != 0x0d ||
+                        pBlockHeader.EOL_0A != 0x0a ||
+                        pBlockHeader.space1 != 0x20 ||
+                        pBlockHeader.space2 != 0x20 ||
+                        pBlockHeader.space3 != 0x20 ||
+                        pBlockHeader.EOL2_0D != 0x0d ||
+                        pBlockHeader.EOL2_0A != 0x0a)
+                    {
+                        throw new Exception("Header is not correct!");
+                    }
+
+                    UInt32 ElemsAddrsSizeHeader = 0;
+                    MemoryTributary pHeaderStream;
+                    UInt32 DataSize = 0;
+                    MemoryTributary pDataStream;
+
+                    //ReadBlockData(inputFileStream, pBlockHeader, pElemsAddrs.elem_header_addr, out pHeaderStream, out ElemsAddrsSizeHeader);
+                    ReadBlockData64(inputFileStream, pBlockHeader, pElemsAddrs.elem_header_addr, out pHeaderStream, out ElemsAddrsSizeHeader);
+
+                    //080228 Блока данных может не быть, тогда адрес блока данных равен 0x7fffffff
+                    if (pElemsAddrs.elem_data_addr != V8_FF64_SIGNATURE)
+                    {
+                        inputFileStream.BaseStream.Position = (long)pElemsAddrs.elem_data_addr;
+                        pBlockHeader = new stBlockHeader64(inputFileStream.ReadBytes((int)stBlockHeader64.Size()), 0);
+                        //ReadBlockData(inputFileStream, pBlockHeader, pElemsAddrs.elem_data_addr, out pDataStream, out DataSize);
+                        ReadBlockData64(inputFileStream, pBlockHeader, pElemsAddrs.elem_data_addr, out pDataStream, out DataSize);
+                    }
+                    else
+                    {
+                        throw new Exception("Incorrect data block!");
+                    }
+
+                    CV8Elem elem = new CV8Elem(pHeaderStream, ElemsAddrsSizeHeader, pDataStream, (UInt32)pDataStream.Length, this, false, false, useTempFiles);
+
+                    if (boolInflate && IsDataPacked)
+                    {
+                        bool success = Inflate(elem.GetDataLikeMemStream(), out InflateBufferStream);
+
+                        if (!success)
+                        {
+                            IsDataPacked = false;
+                            elem.SetDataFromMemStream(InflateBufferStream);
+                            elem.DataSize = (UInt32)InflateBufferStream.Length;
+                            elem.IsV8File = false;
+                        }
+                        else
+                        {
+                            elem.NeedUnpack = false; // отложенная распаковка не нужна
+                            elem.pData = null; //нераспакованные данные больше не нужны
+                            if (IsV8File(InflateBufferStream))
+                            {
+                                elem.UnpackedData = new V8File(this, InflateBufferStream, (int)InflateSize, boolInflate, this.OperationMode);
+                                elem.pData = null;
+                                elem.IsV8File = true;
+                            }
+                            else
+                            {
+                                elem.SetDataFromMemStream(InflateBufferStream);
+                                elem.DataSize = InflateSize;
+                                elem.IsV8File = false;
+                            }
+                        }
+                    }
+
+                    elem.InitElemName64(inputFileStream, pElemsAddrs);
+                    Elems.Add(elem);
+
+                }
+
+                inputFileStream.BaseStream.Position = prevPosition;
+            }
+
+
+
             private void LoadFileFromFolder(string dirname, bool enableNewCode = true)
             {
                 long sourceDIrectorySize = DirSize(new DirectoryInfo(dirname));
@@ -1043,6 +1215,9 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                 return success;
             }
+
+
+
             private void SaveFile(string filename, bool enableNewCode = true)
             {
                 using (FileStream strWriter = new FileStream(filename, System.IO.FileMode.Create))
@@ -1362,6 +1537,7 @@ namespace DevelPlatform.OneCEUtils.V8Formats
                     cur_pos++;
                 }
             }
+     
             private void ReadBlockData(BinaryReader inputFileStream, stBlockHeader? pBlockHeader, UInt32 elemHeaderAddr, out MemoryTributary pBlockDataStream, out UInt32 BlockDataSize)
             {
                 pBlockDataStream = new MemoryTributary();
@@ -1408,7 +1584,57 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                 BlockDataSize = data_size;
             }
-             
+
+
+            private void ReadBlockData64(BinaryReader inputFileStream, stBlockHeader64? pBlockHeader, UInt64 elemHeaderAddr, out MemoryTributary pBlockDataStream, out UInt32 BlockDataSize)
+            {
+                pBlockDataStream = new MemoryTributary();
+
+                if (pBlockHeader == null)
+                    pBlockHeader = new stBlockHeader64();
+
+                UInt64 data_size = 0, page_size = 0, next_page_addr = 0;
+                UInt32 read_in_bytes = 0, bytes_to_read = 0;
+
+                BlockDataSize = 0;
+
+                if (pBlockHeader != null)
+                {
+                    data_size = _httoi64(((stBlockHeader64)pBlockHeader).data_size_hex);
+                    if (data_size == 0)
+                    {
+                        throw new Exception("ReadBlockData. Block мData == NULL.");
+                    }
+                }
+
+                read_in_bytes = 0;
+                UInt64 adr = elemHeaderAddr + stBlockHeader64.Size(); // Конец header
+                while (read_in_bytes < data_size)
+                {
+                    page_size = _httoi64(((stBlockHeader64)pBlockHeader).page_size_hex);
+                    next_page_addr = _httoi64(((stBlockHeader64)pBlockHeader).next_page_addr_hex);
+
+                    bytes_to_read = (uint)Math.Min(page_size, data_size - read_in_bytes);
+
+                    inputFileStream.BaseStream.Position = (long)adr;
+                    pBlockDataStream.Write(inputFileStream.ReadBytes((int)bytes_to_read), 0, (int)bytes_to_read);
+                    read_in_bytes += bytes_to_read;
+
+                    if (next_page_addr != V8Formats.V8File.V8_FF64_SIGNATURE) // есть следующая страница
+                    {
+                        adr = (uint)(next_page_addr + stBlockHeader64.Size());
+                        inputFileStream.BaseStream.Position = (long)next_page_addr;
+                        pBlockHeader = new stBlockHeader64(inputFileStream.ReadBytes((int)stBlockHeader64.Size()), 0);
+                    }
+                    else
+                        break;
+                }
+
+                BlockDataSize = (uint)data_size;
+            }
+
+
+
             #endregion
 
             #region Service
@@ -1422,6 +1648,18 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                 return result;
             }
+
+            private UInt64 _httoi64(byte[] value)
+            {
+                UInt64 result = 0;
+
+                string newByte = System.Text.Encoding.Default.GetString(value);
+                result = UInt64.Parse(newByte, System.Globalization.NumberStyles.HexNumber);
+
+                return result;
+            }
+
+
             private byte[] _intTo_BytesChar(UInt32 value)
             {
                 string valueString = IntToHexString((int)value, 8).ToLower();
@@ -1796,6 +2034,7 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                     this.elemName = new string(ElemName);
                 }
+                
                 public void InitElemName(BinaryReader inputFileStream, stElemAddr ElemAddr)
                 {
                     this.elemNameLen = (ElemAddr.elem_data_addr - 4 - ElemAddr.elem_header_addr - stBlockHeader.Size() - stElemHeaderBegin.Size()) / 2;
@@ -1832,6 +2071,47 @@ namespace DevelPlatform.OneCEUtils.V8Formats
 
                     this.elemName = new string(ElemName);
                 }
+
+
+                public void InitElemName64(BinaryReader inputFileStream, stElemAddr64 ElemAddr)
+                {
+                    this.elemNameLen = (uint)(ElemAddr.elem_data_addr - 4 - ElemAddr.elem_header_addr - stBlockHeader64.Size() - stElemHeaderBegin.Size()) / 2;
+
+                    char[] invalidChars = Path.GetInvalidFileNameChars();
+                    char[] ElemName = new char[0];
+                    char[] ElemNameBuf = new char[this.elemNameLen];
+
+                    int validChars = 0;
+                    for (UInt32 j = 0; j < this.elemNameLen * 2; j += 2)
+                    {
+                        inputFileStream.BaseStream.Position = (long)(j + ElemAddr.elem_header_addr + stBlockHeader64.Size() + stElemHeaderBegin.Size());
+                        char curChar = Convert.ToChar(inputFileStream.ReadByte());
+
+                        if (invalidChars.Where(ch => ch == curChar).Count() != 0)
+                        {
+                            ElemName = new char[validChars];
+                            break;
+                        }
+
+                        ElemNameBuf[j / 2] = curChar;
+                        validChars++;
+                    }
+
+                    if (ElemName.Length != 0)
+                    {
+                        for (int i = 0; i < ElemName.Length; i++)
+                            ElemName[i] = ElemNameBuf[i];
+                    }
+                    else
+                    {
+                        ElemName = ElemNameBuf;
+                    }
+
+                    this.elemName = new string(ElemName);
+                }
+
+
+
                 public void SetElemName(string ElemName, int ElemNameLen)
                 {
                     byte[] pHeaderBuffer = new byte[this.HeaderSize];
